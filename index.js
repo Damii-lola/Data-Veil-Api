@@ -104,22 +104,24 @@ app.post('/api/encrypt', async (req, res) => {
     const code = encryptMap[ch];
     if (!code) return res.status(400).json({ error: `Char '${ch}' not found` });
 
-    // Steps 2–7 (unchanged)
+    // Step 2 – split
     const first3 = code.slice(0,3);
     const next2  = code.slice(3,5);
     const last4  = code.slice(5,9);
+
+    // Step 3 – CORRECTED: (a+b) and (a+b+c)
     const a = +first3[0], b = +first3[1], c = +first3[2];
-    const sum_ab = a+b;
+    const sum_ab = a + b;
+    const sum_abc = sum_ab + c;        // this replaces "b+c"
     const prod = sum_ab * c;
-    const sum_bc = b+c;
-    const mod1 = prod % sum_bc;
-    const mod2 = sum_bc % prod;
+    const mod1 = prod % sum_abc;
+    const mod2 = sum_abc % prod;
     const carry = mod1 + mod2;
 
     const midVal = parseInt(next2, 10);
     const step4res = carry * midVal;
 
-    // Step 5 – scramble
+    // Step 5 – scramble (move first to back / last to front)
     let rot = last4;
     const set1 = [], set2 = [];
     for (let i=0;i<3;i++) {
@@ -172,13 +174,13 @@ app.post('/api/encrypt', async (req, res) => {
     const base5AsBigDec = fromBaseN(base5_2, 10);
     const base7 = toBaseN(base5AsBigDec, 7);
     const base7AsBigDec = fromBaseN(base7, 10);
-    const hex = toBaseN(base7AsBigDec, 16).toUpperCase();
+    const hex10 = toBaseN(base7AsBigDec, 16).toUpperCase();
 
     // Step 11 – wrap with table signature
     const sig = String(currentTableKey).padStart(4, '0');
     const last2sig = sig.slice(2);
     const first2sig = sig.slice(0,2);
-    const wrapped = last2sig + hex + first2sig;
+    const wrapped = last2sig + hex10 + first2sig;
 
     // Step 12 – swap first 4 & last 4
     const first4 = wrapped.slice(0,4);
@@ -186,19 +188,12 @@ app.post('/api/encrypt', async (req, res) => {
     const mid = wrapped.slice(4, -4);
     const swapped = last4part + mid + first4;
 
-    // ---------- Steps 13‑16 (applied per character) ----------
-    // Step 13: treat swapped as hex → base 10
+    // Steps 13‑16
     const step13BigInt = BigInt('0x' + swapped);
     const step13Base10 = step13BigInt.toString(10);
-
-    // Step 14: base10 → base4
     const step14Base4 = toBaseN(step13BigInt, 4);
-
-    // Step 15: treat base4 as base10 → base9
-    const step15BigInt = fromBaseN(step14Base4, 10);   // interpret base4 string as decimal
+    const step15BigInt = fromBaseN(step14Base4, 10);
     const step15Base9 = toBaseN(step15BigInt, 9);
-
-    // Step 16: treat base9 as base10 → base16 (hex)
     const step16BigInt = fromBaseN(step15Base9, 10);
     const finalHex = toBaseN(step16BigInt, 16).toUpperCase();
 
@@ -208,27 +203,27 @@ app.post('/api/encrypt', async (req, res) => {
       character: ch,
       code,
       first3, next2, last4,
-      step3: { a,b,c,sum_ab, prod, sum_bc, mod1, mod2, carry },
+      step3: { a,b,c, sum_ab, sum_abc, prod, mod1, mod2, carry },
       step4: { midVal, step4res },
       step5: { set1, set2, diffs, scrambleSum },
       step6: { dividend:scrambleSum, divisor:step4res, quotient:step6quotient },
       step7: { base5Str, base5AsDecimal, first3Num, product:step7result },
       step8: { sumBase5, divisor1, mod1_8, div1_8, mod2_8, div2_8, last4Sum, divisor2, mod3_8, chainNumbers, chainSum, chainFinal },
       step9: { weaved },
-      step10: { base5_2, base7, hex },
+      step10: { base5_2, base7, hex: hex10 },
       step11: { sig, last2sig, first2sig, wrapped },
       step12: { first4, last4part, mid, swapped },
-      step13: { swappedHex: swapped, base10: step13Base10 },
+      step13: { base10: step13Base10 },
       step14: { base4: step14Base4 },
-      step15: { base4AsDecimal: step14Base4, base9: step15Base9 },
-      step16: { base9AsDecimal: step15Base9, finalHex }
+      step15: { base9: step15Base9 },
+      step16: { finalHex }
     });
   }
 
   const finalOutput = finalPieces.join('');
   console.log(`✅ Full encrypt: "${text}" -> ${finalOutput.length} chars hex`);
 
-  // Optional log
+  // optional logging
   try {
     await supabase.from('cipher_logs').insert({
       operation: 'encrypt',
@@ -240,7 +235,7 @@ app.post('/api/encrypt', async (req, res) => {
   res.json({ tableKey: currentTableKey, result: finalOutput, steps: allSteps });
 });
 
-// Decrypt unchanged
+// Decrypt (unchanged – works only with old 9‑digit codes)
 app.post('/api/decrypt', async (req, res) => {
   if (!Object.keys(decryptMap).length) return res.status(503).json({ error:'Mapping not loaded' });
   const { ciphertext } = req.body;
