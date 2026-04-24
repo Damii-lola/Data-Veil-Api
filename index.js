@@ -56,10 +56,9 @@ setInterval(loadCipherTable, 30 * 60 * 1000);
 
 function sha256(s) { return crypto.createHash('sha256').update(s).digest('hex'); }
 
-// -------- HELPER FUNCTIONS --------
+// -------- BIGINT BASE CONVERSIONS --------
 const sumDigits = s => [...s].reduce((sum, d) => sum + parseInt(d, 10), 0);
 
-// Convert a BigInt or Number to base N (returns string)
 function toBaseN(num, radix) {
   if (radix === 10) return num.toString(10);
   const big = BigInt(num);
@@ -77,7 +76,6 @@ function fromBaseN(str, radix) {
   return [...str].reduce((acc, d) => acc * BigInt(radix) + BigInt(parseInt(d, radix)), 0n);
 }
 
-// Weave two numbers: startDigit is prepended, then alternate 1 digit from num1, 3 from num2, repeat
 function weave(startDigit, num1, num2) {
   const s1 = String(num1);
   const s2 = String(num2);
@@ -94,7 +92,7 @@ function weave(startDigit, num1, num2) {
   return result;
 }
 
-// -------- ENCRYPT (FULL 12 STEPS) --------
+// -------- ENCRYPT (FULL 16 STEPS) --------
 app.post('/api/encrypt', async (req, res) => {
   if (!Object.keys(encryptMap).length)
     return res.status(503).json({ error: 'Mapping not loaded yet.' });
@@ -110,7 +108,7 @@ app.post('/api/encrypt', async (req, res) => {
     const code = encryptMap[ch];
     if (!code) return res.status(400).json({ error: `Char '${ch}' not found` });
 
-    // --- Steps 2‑7 (unchanged) ---
+    // ---------- Steps 2–7 (identical to before) ----------
     const first3 = code.slice(0,3);
     const next2  = code.slice(3,5);
     const last4  = code.slice(5,9);
@@ -145,64 +143,71 @@ app.post('/api/encrypt', async (req, res) => {
       scrambleSum += d;
     }
 
-    // Step 6
     const step6quotient = Math.floor(scrambleSum / step4res);
 
-    // Step 7
     const base5Str = step6quotient.toString(5);
-    const base5AsDecimal = parseInt(base5Str, 10); // safe, base5 len small
+    const base5AsDecimal = parseInt(base5Str, 10);
     const first3Num = parseInt(first3, 10);
     const step7result = base5AsDecimal * first3Num;
 
-    // --- Step 8: Chain calculations ---
+    // ---------- Step 8: Chain ----------
     const sumBase5 = sumDigits(base5Str);
-    const divisor1 = sumBase5 || 1; // prevent /0
-    const bigNum = step7result; // Number (may be large)
+    const divisor1 = sumBase5 || 1;
+    const bigNum = step7result;
     const mod1_8 = bigNum % divisor1;
     const div1_8 = Math.floor(bigNum / divisor1);
     const mod2_8 = div1_8 % divisor1;
     const div2_8 = Math.floor(div1_8 / divisor1);
-
     const last4Sum = sumDigits(last4);
     const divisor2 = last4Sum || 1;
     const mod3_8 = div2_8 % divisor2;
-
     const chainNumbers = [divisor1, mod1_8, mod2_8, mod3_8];
     const chainSum = chainNumbers.reduce((s,v)=>s+v, 0);
     const chainFinal = chainSum * divisor1;
 
-    // --- Step 9: Weave ---
+    // Step 9 – weave
     const weaved = weave(divisor1, chainFinal, div2_8);
 
-    // --- Step 10: Triple base conversion ---
-    // weaved is decimal string, convert to BigInt
+    // Step 10 – triple conversion
     const weavedBig = BigInt(weaved);
     const base5_2 = toBaseN(weavedBig, 5);
-    // Interpret base5_2 as decimal (BigInt)
-    const base5AsBigDec = fromBaseN(base5_2, 10); // parse base5 string as base-10
+    const base5AsBigDec = fromBaseN(base5_2, 10);
     const base7 = toBaseN(base5AsBigDec, 7);
     const base7AsBigDec = fromBaseN(base7, 10);
     const hex = toBaseN(base7AsBigDec, 16).toUpperCase();
 
-    // --- Step 11: Wrap with table signature ---
-    const sig = String(currentTableKey).padStart(4, '0'); // e.g., "4721"
-    const last2sig = sig.slice(2); // "21"
-    const first2sig = sig.slice(0,2); // "47"
+    // Step 11 – wrap with signature
+    const sig = String(currentTableKey).padStart(4, '0');
+    const last2sig = sig.slice(2);
+    const first2sig = sig.slice(0,2);
     const wrapped = last2sig + hex + first2sig;
 
-    // --- Step 12: Swap first 4 and last 4 chars ---
+    // Step 12 – swap first & last 4
     const first4 = wrapped.slice(0,4);
     const last4part = wrapped.slice(-4);
     const mid = wrapped.slice(4, -4);
-    const final = last4part + mid + first4;
+    const swapped = last4part + mid + first4;
 
-    finalPieces.push(final);
+    // ---------- NEW STEPS 13–16 ----------
+    // Step 13: hex → base 10
+    const step13dec = fromBaseN(swapped, 16).toString(10);
 
-    // Store step details for frontend
+    // Step 14: base 10 → base 4
+    const step14base4 = toBaseN(step13dec, 4);
+
+    // Step 15: pretend base4 is decimal → base 9
+    const step14asDec = fromBaseN(step14base4, 10);
+    const step15base9 = toBaseN(step14asDec, 9);
+
+    // Step 16: pretend base9 is decimal → base 16 (hex) → FINAL OUTPUT
+    const step15asDec = fromBaseN(step15base9, 10);
+    const finalHex = toBaseN(step15asDec, 16).toUpperCase();
+
+    finalPieces.push(finalHex);
+
+    // Store every detail for frontend
     allSteps.push({
-      character: ch,
-      code,
-      first3, next2, last4,
+      character: ch, code, first3, next2, last4,
       step3: { a,b,c,sum_ab, prod, sum_bc, mod1, mod2, carry },
       step4: { midVal, step4res },
       step5: { set1, set2, diffs, scrambleSum },
@@ -212,14 +217,17 @@ app.post('/api/encrypt', async (req, res) => {
       step9: { weaved },
       step10: { base5_2, base7, hex },
       step11: { sig, last2sig, first2sig, wrapped },
-      step12: { first4, last4part, mid, final }
+      step12: { first4, last4part, mid, swapped },
+      step13: { hexInput: swapped, decimal: step13dec },
+      step14: { base4: step14base4 },
+      step15: { base9: step15base9 },
+      step16: { finalHex }
     });
   }
 
-  const finalCiphertext = finalPieces.join(''); // concatenate all characters' results
+  const finalCiphertext = finalPieces.join('');
   console.log(`✅ Full encrypt: "${text}" -> ${finalCiphertext.length} chars`);
 
-  // Optional logging
   try {
     await supabase.from('cipher_logs').insert({
       operation: 'encrypt',
@@ -247,7 +255,7 @@ app.post('/api/decrypt', async (req, res) => {
   res.json({ result });
 });
 
-app.get('/', (_,res)=> res.json({ status:'Cipher API v12', tableId:currentTableId, mappings:Object.keys(encryptMap).length }));
+app.get('/', (_,res)=> res.json({ status:'Cipher API v16', tableId:currentTableId, mappings:Object.keys(encryptMap).length }));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', ()=> console.log(`🚀 Port ${PORT}`));
