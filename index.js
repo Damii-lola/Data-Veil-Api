@@ -12,14 +12,13 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
   process.exit(1);
 }
 
-// Initialize with service_role key (bypasses RLS)
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
   auth: { persistSession: false }
 });
 
 // ================== EXPRESS SETUP ==================
 const app = express();
-app.use(cors());   // allow all origins for now
+app.use(cors());
 app.use(express.json({ limit: '1mb' }));
 
 // Log incoming requests
@@ -34,15 +33,15 @@ app.use((req, res, next) => {
 });
 
 // ================== CIPHER MAPPING LOADER ==================
-let encryptMap = {};   // character → 9‑digit
-let decryptMap = {};   // 9‑digit → character
+let encryptMap = {};
+let decryptMap = {};
 let currentTableId = null;
+let currentTableKey = null;
 
 async function loadCipherTable() {
   try {
     console.log('🔄 Loading cipher table...');
 
-    // Fetch the latest table – use limit(1) and maybeSingle() to avoid errors
     const { data: tables, error: tableError } = await supabase
       .from('cipher_tables')
       .select('id, table_key')
@@ -61,9 +60,9 @@ async function loadCipherTable() {
     }
 
     currentTableId = latestTable.id;
-    console.log(`🔑 Using table id ${currentTableId} (table_key: ${latestTable.table_key})`);
+    currentTableKey = latestTable.table_key;
+    console.log(`🔑 Using table id ${currentTableId} (table_key: ${currentTableKey})`);
 
-    // Fetch all character mappings
     const { data: mappings, error: mapError } = await supabase
       .from('character_mappings')
       .select('character, mapped_code')
@@ -79,7 +78,6 @@ async function loadCipherTable() {
       return;
     }
 
-    // Build both maps
     encryptMap = {};
     decryptMap = {};
     for (const row of mappings) {
@@ -93,7 +91,6 @@ async function loadCipherTable() {
   }
 }
 
-// Load immediately, and then every 30 minutes
 loadCipherTable();
 setInterval(loadCipherTable, 30 * 60 * 1000);
 
@@ -111,6 +108,7 @@ app.get('/', (req, res) => {
   });
 });
 
+// --- ENCRYPT (with step 2) ---
 app.post('/api/encrypt', async (req, res) => {
   console.log('🔐 Encrypt request received');
 
@@ -124,33 +122,57 @@ app.post('/api/encrypt', async (req, res) => {
     return res.status(400).json({ error: 'Missing or empty "text" field.' });
   }
 
+  const resultParts = [];
+  const steps = [];
+
   for (let i = 0; i < text.length; i++) {
     const ch = text.charAt(i);
-    if (!(ch in encryptMap)) {
+    const code = encryptMap[ch];
+    if (!code) {
       console.warn(`⚠️  Encrypt rejected: unknown character '${ch}' (code ${ch.charCodeAt(0)})`);
       return res.status(400).json({
         error: `Character '${ch}' (position ${i}) is not in the cipher table. Only ASCII 32-126 are allowed.`
       });
     }
+
+    resultParts.push(code);
+
+    // Split the 9-digit code into 3 chunks
+    const first3 = code.slice(0, 3);
+    const next2 = code.slice(3, 5);
+    const last4 = code.slice(5, 9);
+
+    steps.push({
+      character: ch,
+      code,
+      first3,
+      next2,
+      last4
+    });
   }
 
-  const result = Array.from(text).map(ch => encryptMap[ch]).join('');
-  console.log(`✅ Encrypt success: ${text.length} chars → ${result.length} digits`);
+  const fullResult = resultParts.join('');
+  console.log(`✅ Encrypt success: ${text.length} chars → ${fullResult.length} digits`);
 
-  // Log to Supabase (optional, fire-and-forget)
+  // Optional logging (fire-and-forget)
   try {
     await supabase.from('cipher_logs').insert({
       operation: 'encrypt',
       input_hash: sha256(text),
-      output_hash: sha256(result)
+      output_hash: sha256(fullResult)
     });
   } catch (e) {
     console.error('Log error (non-fatal):', e.message);
   }
 
-  res.json({ result });
+  res.json({
+    tableKey: currentTableKey,
+    result: fullResult,
+    steps: steps
+  });
 });
 
+// --- DECRYPT (unchanged, but still functional) ---
 app.post('/api/decrypt', async (req, res) => {
   console.log('🔓 Decrypt request received');
 
@@ -195,7 +217,7 @@ app.post('/api/decrypt', async (req, res) => {
   res.json({ result });
 });
 
-// Catch-all
+// Catch‑all
 app.use((req, res) => {
   console.warn(`⚠️  Undefined route: ${req.method} ${req.originalUrl}`);
   res.status(404).json({ error: `Route ${req.method} ${req.originalUrl} not found.` });
