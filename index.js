@@ -11,13 +11,14 @@ const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY;
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-// Cached data from Supabase
-let cipherMap = {};        // character -> 9-digit code
-let tableSignature = '';   // 4-character hex signature
+// ---------- Hardcoded table signature ----------
+const tableSignature = 'A012';   // <--- CHANGE THIS to your desired 4‑char hex
 
-// ---------- Load mapping & signature on startup ----------
+// Cached mapping from Supabase (character → 9‑digit code)
+let cipherMap = {};
+
+// ---------- Load mapping on startup ----------
 async function loadCipherData() {
-  // Load all character→code mappings
   const { data: rows, error } = await supabase
     .from('cipher_map')
     .select('character, code');
@@ -25,19 +26,8 @@ async function loadCipherData() {
   rows.forEach(row => {
     cipherMap[row.character] = row.code;
   });
-
-  // Load table signature
-  const { data: configRows, error: configError } = await supabase
-    .from('cipher_config')
-    .select('value')
-    .eq('key', 'table_signature')
-    .single();
-  if (configError || !configRows) {
-    throw new Error('Table signature not found. Make sure you ran the SQL to insert it.');
-  }
-  tableSignature = configRows.value;
-
-  console.log(`Loaded ${Object.keys(cipherMap).length} character mappings. Signature: ${tableSignature}`);
+  console.log(`Loaded ${Object.keys(cipherMap).length} character mappings.`);
+  console.log(`Using hardcoded table signature: ${tableSignature}`);
 }
 
 // ---------- Encryption for a single character ----------
@@ -48,9 +38,9 @@ function encryptChar(char) {
   }
 
   // Step 2: Split the 9-digit code
-  const first3 = code9.slice(0, 3);   // e.g. "517"
-  const next2  = code9.slice(3, 5);   // "78"
-  const last4  = code9.slice(5, 9);   // "2813"   ← original last4 (from mapping)
+  const first3 = code9.slice(0, 3);
+  const next2  = code9.slice(3, 5);
+  const last4  = code9.slice(5, 9);
 
   const first3Num = BigInt(first3);
   const next2Num  = BigInt(next2);
@@ -65,7 +55,7 @@ function encryptChar(char) {
   const step3 = (AA0 % AA1) + (AA1 % AA0);
 
   // Step 4: Multiply by next2
-  const AO = step3 * next2Num;        // 16 * 78 = 1248
+  const AO = step3 * next2Num;
 
   // Step 5: Scramble the last 4 digits
   const digits = last4.split('').map(Number);
@@ -93,7 +83,7 @@ function encryptChar(char) {
   // Step 6: Divide
   const AC = AB / AO;
 
-  // Step 7: Convert AC to base 5 → AE, then AD = AE * first3
+  // Step 7: Base 5 of AC
   const AE = AC.toString(5);
   const AD = BigInt(AE) * first3Num;
 
@@ -107,7 +97,7 @@ function encryptChar(char) {
   const AF3 = AI % denom;
   const AF  = (AF0 + AF1 + AF2 + AF3) * AF0;
 
-  // Step 9: Interleave AF and AI to build B0
+  // Step 9: Interleave to B0
   const afDigits = AF.toString().split('');
   const aiDigits = AI.toString().split('');
   let b0 = AF0.toString();
@@ -125,29 +115,26 @@ function encryptChar(char) {
   }
 
   // Step 10: Triple base conversion
-  const B1 = BigInt(b0).toString(5);            // decimal → base5
-  const B2 = BigInt(B1).toString(7);            // B1 as decimal → base7
-  const B  = BigInt(B2).toString(16).toUpperCase(); // B2 as decimal → hex
+  const B1 = BigInt(b0).toString(5);
+  const B2 = BigInt(B1).toString(7);
+  const B  = BigInt(B2).toString(16).toUpperCase();
 
   // Step 11: Wrap with table signature
   const sigFirst2 = tableSignature.slice(0, 2);
   const sigLast2  = tableSignature.slice(2, 4);
   const wrapped = sigLast2 + B + sigFirst2;
 
-  // Step 12: Swap first 4 and last 4, then final conversions
+  // Step 12: Swap first 4 & last 4, then final conversions
   if (wrapped.length < 8) throw new Error('Wrapped string too short');
   const first4 = wrapped.slice(0, 4);
-  const last4Swapped = wrapped.slice(-4);        // renamed to avoid duplicate declaration
+  const last4Swapped = wrapped.slice(-4);
   const middle = wrapped.slice(4, -4);
   const swapped = last4Swapped + middle + first4;
 
   let val = BigInt('0x' + swapped);
-  // decimal → base4
   const base4 = val.toString(4);
-  // treat base4 string as decimal → base9
   val = BigInt(base4);
   const base9 = val.toString(9);
-  // treat base9 string as decimal → hexadecimal (final output)
   val = BigInt(base9);
   const finalHex = val.toString(16).toUpperCase();
 
