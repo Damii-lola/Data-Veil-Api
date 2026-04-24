@@ -19,7 +19,7 @@ app.use((req, res, next) => {
   next();
 });
 
-// -------- CIPHER MAPPING LOADER --------
+// -------- MAPPING LOADER --------
 let encryptMap = {};
 let decryptMap = {};
 let currentTableId = null;
@@ -30,16 +30,18 @@ async function loadCipherTable() {
     const { data: tables, error } = await supabase
       .from('cipher_tables').select('id, table_key').order('id', { ascending: false }).limit(1);
     if (error || !tables?.length) {
-      console.error('❌ cipher_tables load failed');
+      console.error('❌ No cipher table found');
       return;
     }
     const latest = tables[0];
     currentTableId = latest.id;
     currentTableKey = latest.table_key;
+    console.log(`🔑 Using table ${currentTableId} key ${currentTableKey}`);
+
     const { data: mappings, error: mapErr } = await supabase
       .from('character_mappings').select('character, mapped_code').eq('table_id', currentTableId);
     if (mapErr) {
-      console.error('❌ mappings load failed');
+      console.error('❌ mappings load failed:', mapErr.message);
       return;
     }
     encryptMap = {};
@@ -48,15 +50,13 @@ async function loadCipherTable() {
       encryptMap[row.character] = row.mapped_code;
       decryptMap[row.mapped_code] = row.character;
     }
-    console.log(`✅ Loaded ${Object.keys(encryptMap).length} mappings for table ${currentTableId}`);
+    console.log(`✅ Loaded ${Object.keys(encryptMap).length} unique mappings`);
   } catch (e) { console.error(e); }
 }
 loadCipherTable();
 setInterval(loadCipherTable, 30 * 60 * 1000);
 
 function sha256(s) { return crypto.createHash('sha256').update(s).digest('hex'); }
-
-// -------- UTILITY FUNCTIONS --------
 const sumDigits = s => [...s].reduce((sum, d) => sum + parseInt(d, 10), 0);
 
 function toBaseN(num, radix) {
@@ -76,19 +76,19 @@ function fromBaseN(str, radix) {
   return [...str].reduce((acc, d) => acc * BigInt(radix) + BigInt(parseInt(d, radix)), 0n);
 }
 
-function weave(startDigit, num1, num2) {
+function weave(start, num1, num2) {
   const s1 = String(num1);
   const s2 = String(num2);
-  let result = String(startDigit);
+  let res = String(start);
   let i = 0, j = 0;
   while (i < s1.length || j < s2.length) {
-    if (i < s1.length) { result += s1[i]; i++; }
-    for (let k = 0; k < 3 && j < s2.length; k++) { result += s2[j]; j++; }
+    if (i < s1.length) { res += s1[i]; i++; }
+    for (let k = 0; k < 3 && j < s2.length; k++) { res += s2[j]; j++; }
   }
-  return result;
+  return res;
 }
 
-// -------- ENCRYPT (ALL 16 STEPS) --------
+// -------- ENCRYPT --------
 app.post('/api/encrypt', async (req, res) => {
   if (!Object.keys(encryptMap).length)
     return res.status(503).json({ error: 'Mapping not loaded yet.' });
@@ -104,15 +104,14 @@ app.post('/api/encrypt', async (req, res) => {
     const code = encryptMap[ch];
     if (!code) return res.status(400).json({ error: `Char '${ch}' not found` });
 
-    // Step 2 – split
     const first3 = code.slice(0,3);
     const next2  = code.slice(3,5);
     const last4  = code.slice(5,9);
-
-    // Step 3 – CORRECTED: (a+b) and (a+b+c)
     const a = +first3[0], b = +first3[1], c = +first3[2];
+
+    // Step 3 – CORRECTED: a+b, then (a+b)*c, then mod with (a+b+c)
     const sum_ab = a + b;
-    const sum_abc = sum_ab + c;        // this replaces "b+c"
+    const sum_abc = sum_ab + c;
     const prod = sum_ab * c;
     const mod1 = prod % sum_abc;
     const mod2 = sum_abc % prod;
@@ -121,7 +120,7 @@ app.post('/api/encrypt', async (req, res) => {
     const midVal = parseInt(next2, 10);
     const step4res = carry * midVal;
 
-    // Step 5 – scramble (move first to back / last to front)
+    // Step 5
     let rot = last4;
     const set1 = [], set2 = [];
     for (let i=0;i<3;i++) {
@@ -141,16 +140,14 @@ app.post('/api/encrypt', async (req, res) => {
       scrambleSum += d;
     }
 
-    // Step 6
     const step6quotient = Math.floor(scrambleSum / step4res);
 
-    // Step 7
     const base5Str = step6quotient.toString(5);
     const base5AsDecimal = parseInt(base5Str, 10);
     const first3Num = parseInt(first3, 10);
     const step7result = base5AsDecimal * first3Num;
 
-    // Step 8 – chain
+    // Step 8
     const sumBase5 = sumDigits(base5Str);
     const divisor1 = sumBase5 || 1;
     const bigNum = step7result;
@@ -165,10 +162,8 @@ app.post('/api/encrypt', async (req, res) => {
     const chainSum = chainNumbers.reduce((s,v)=>s+v, 0);
     const chainFinal = chainSum * divisor1;
 
-    // Step 9 – weave
     const weaved = weave(divisor1, chainFinal, div2_8);
 
-    // Step 10 – triple base conversion
     const weavedBig = BigInt(weaved);
     const base5_2 = toBaseN(weavedBig, 5);
     const base5AsBigDec = fromBaseN(base5_2, 10);
@@ -176,19 +171,17 @@ app.post('/api/encrypt', async (req, res) => {
     const base7AsBigDec = fromBaseN(base7, 10);
     const hex10 = toBaseN(base7AsBigDec, 16).toUpperCase();
 
-    // Step 11 – wrap with table signature
     const sig = String(currentTableKey).padStart(4, '0');
     const last2sig = sig.slice(2);
     const first2sig = sig.slice(0,2);
     const wrapped = last2sig + hex10 + first2sig;
 
-    // Step 12 – swap first 4 & last 4
     const first4 = wrapped.slice(0,4);
     const last4part = wrapped.slice(-4);
     const mid = wrapped.slice(4, -4);
     const swapped = last4part + mid + first4;
 
-    // Steps 13‑16
+    // Step 13‑16
     const step13BigInt = BigInt('0x' + swapped);
     const step13Base10 = step13BigInt.toString(10);
     const step14Base4 = toBaseN(step13BigInt, 4);
@@ -223,7 +216,6 @@ app.post('/api/encrypt', async (req, res) => {
   const finalOutput = finalPieces.join('');
   console.log(`✅ Full encrypt: "${text}" -> ${finalOutput.length} chars hex`);
 
-  // optional logging
   try {
     await supabase.from('cipher_logs').insert({
       operation: 'encrypt',
@@ -251,7 +243,7 @@ app.post('/api/decrypt', async (req, res) => {
   res.json({ result });
 });
 
-app.get('/', (_,res)=> res.json({ status:'Cipher API v16', tableId:currentTableId, mappings:Object.keys(encryptMap).length }));
+app.get('/', (_,res)=> res.json({ status:'Cipher API v16', tableId:currentTableId, mappingsLoaded:Object.keys(encryptMap).length }));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', ()=> console.log(`🚀 Port ${PORT}`));
