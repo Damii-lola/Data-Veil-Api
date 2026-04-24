@@ -44,19 +44,18 @@ async function loadCipherData() {
 function encryptChar(char) {
   const code9 = cipherMap[char];
   if (!code9) {
-    // Character not in map – you can skip it or throw an error
     throw new Error(`Character '${char}' not found in cipher_map`);
   }
 
   // Step 2: Split the 9-digit code
-  const first3 = code9.slice(0, 3);   // string, e.g. "517"
+  const first3 = code9.slice(0, 3);   // e.g. "517"
   const next2  = code9.slice(3, 5);   // "78"
-  const last4  = code9.slice(5, 9);   // "2813"
+  const last4  = code9.slice(5, 9);   // "2813" – this is the original last4
 
   const first3Num = BigInt(first3);
   const next2Num  = BigInt(next2);
 
-  // ---------- Step 3: Work the first 3 digits ----------
+  // Step 3: Work the first 3 digits
   const d1 = BigInt(first3[0]);
   const d2 = BigInt(first3[1]);
   const d3 = BigInt(first3[2]);
@@ -65,12 +64,12 @@ function encryptChar(char) {
   const AA1 = AA + d3;                    // 6+7 = 13
   const step3 = (AA0 % AA1) + (AA1 % AA0); // 42%13 + 13%42 = 3+13 = 16
 
-  // ---------- Step 4: Multiply by next2 ----------
+  // Step 4: Multiply by next2
   const AO = step3 * next2Num;            // 16 * 78 = 1248
 
-  // ---------- Step 5: Scramble the last 4 digits ----------
+  // Step 5: Scramble the last 4 digits
   const digits = last4.split('').map(Number);
-  // Array AB0: shift the first digit stepwise to the right
+  // AB0: shift the first digit stepwise to the right
   const AB0 = [];
   for (let i = 1; i <= 3; i++) {
     const arr = [...digits];
@@ -78,7 +77,7 @@ function encryptChar(char) {
     arr.splice(i, 0, first);
     AB0.push(arr.join(''));
   }
-  // Array AB1: shift the last digit stepwise to the left
+  // AB1: shift the last digit stepwise to the left
   const AB1 = [];
   for (let j = 0; j <= 2; j++) {
     const arr = [...digits];
@@ -86,7 +85,6 @@ function encryptChar(char) {
     arr.splice(j, 0, last);
     AB1.push(arr.join(''));
   }
-  // Sum of absolute differences
   let AB = 0n;
   for (let i = 0; i < 3; i++) {
     let diff = BigInt(AB0[i]) - BigInt(AB1[i]);
@@ -94,15 +92,14 @@ function encryptChar(char) {
     AB += diff;
   }
 
-  // ---------- Step 6: Divide ----------
+  // Step 6: Divide
   const AC = AB / AO;                     // 15975 / 1248 = 12 (integer division)
 
-  // ---------- Step 7: Base 5 of AC ----------
-  const AE = AC.toString(5);              // "22" (base-5 representation)
-  // Treat AE as a decimal number and multiply by first3
-  const AD = BigInt(AE) * first3Num;      // 22 * 517 = 11374
+  // Step 7: Base 5 of AC
+  const AE = AC.toString(5);              // base-5 representation
+  const AD = BigInt(AE) * first3Num;
 
-  // ---------- Step 8: The AF chain ----------
+  // Step 8: The AF chain
   const AF0 = BigInt(AE.split('').reduce((s, d) => s + parseInt(d), 0)); // sum of digits of AE
   const AF1 = AD % AF0;
   const AG  = AD / AF0;
@@ -112,10 +109,10 @@ function encryptChar(char) {
   const AF3 = AI % denom;
   const AF  = (AF0 + AF1 + AF2 + AF3) * AF0;
 
-  // ---------- Step 9: Interleave to B0 ----------
+  // Step 9: Interleave to B0
   const afDigits = AF.toString().split('');
   const aiDigits = AI.toString().split('');
-  let b0 = AF0.toString();               // start with AF0
+  let b0 = AF0.toString();                 // start with AF0
   let i = 0, j = 0;
   while (i < afDigits.length || j < aiDigits.length) {
     if (i < afDigits.length) {
@@ -123,32 +120,29 @@ function encryptChar(char) {
       i++;
     }
     if (j < aiDigits.length) {
-      // take up to 3 digits from AI
       const chunk = aiDigits.slice(j, j + 3).join('');
       b0 += chunk;
       j += 3;
     }
   }
 
-  // ---------- Step 10: Triple base conversion ----------
-  // B0 is a decimal string
-  const B1 = BigInt(b0).toString(5);            // decimal -> base 5
-  const B2 = BigInt(B1).toString(7);            // B1 as decimal -> base 7
-  const B  = BigInt(B2).toString(16).toUpperCase();  // B2 as decimal -> hex (uppercase)
+  // Step 10: Triple base conversion
+  const B1 = BigInt(b0).toString(5);       // decimal -> base 5
+  const B2 = BigInt(B1).toString(7);       // B1 as decimal -> base 7
+  const B  = BigInt(B2).toString(16).toUpperCase();  // B2 as decimal -> hex
 
-  // ---------- Step 11: Wrap with table signature ----------
+  // Step 11: Wrap with table signature
   const sigFirst2 = tableSignature.slice(0, 2);
   const sigLast2  = tableSignature.slice(2, 4);
-  const wrapped = sigLast2 + B + sigFirst2;    // last2 + B + first2
+  const wrapped = sigLast2 + B + sigFirst2;  // last2 + B + first2
 
-  // ---------- Step 12: Swap first 4 & last 4, then final mis‑conversions ----------
+  // Step 12: Swap first 4 & last 4, then final mis‑conversions
   if (wrapped.length < 8) throw new Error('Wrapped string too short');
   const first4 = wrapped.slice(0, 4);
-  const last4  = wrapped.slice(-4);
+  const last4Swapped = wrapped.slice(-4);   // FIXED: renamed to avoid conflict
   const middle = wrapped.slice(4, -4);
-  const swapped = last4 + middle + first4;
+  const swapped = last4Swapped + middle + first4;
 
-  // swapped is a hex string -> treat as hex number -> decimal
   let val = BigInt('0x' + swapped);
   // decimal -> base 4
   const base4 = val.toString(4);
@@ -168,9 +162,7 @@ function encryptText(plaintext) {
   for (const char of plaintext) {
     blocks.push(encryptChar(char));
   }
-  // Concatenate all blocks (later for decryption we'd need a separator;
-  // you can use e.g. ':' if desired)
-  return blocks.join('');
+  return blocks.join('');  // concatenated, no separator
 }
 
 // ---------- Routes ----------
