@@ -56,11 +56,10 @@ setInterval(loadCipherTable, 30 * 60 * 1000);
 
 function sha256(s) { return crypto.createHash('sha256').update(s).digest('hex'); }
 
-// -------- BIGINT BASE CONVERSIONS --------
+// -------- HELPER FUNCTIONS --------
 const sumDigits = s => [...s].reduce((sum, d) => sum + parseInt(d, 10), 0);
 
 function toBaseN(num, radix) {
-  if (radix === 10) return num.toString(10);
   const big = BigInt(num);
   if (big === 0n) return '0';
   const digits = [];
@@ -82,12 +81,8 @@ function weave(startDigit, num1, num2) {
   let result = String(startDigit);
   let i = 0, j = 0;
   while (i < s1.length || j < s2.length) {
-    if (i < s1.length) {
-      result += s1[i]; i++;
-    }
-    for (let k = 0; k < 3 && j < s2.length; k++) {
-      result += s2[j]; j++;
-    }
+    if (i < s1.length) result += s1[i++];
+    for (let k = 0; k < 3 && j < s2.length; k++) result += s2[j++];
   }
   return result;
 }
@@ -102,73 +97,56 @@ app.post('/api/encrypt', async (req, res) => {
     return res.status(400).json({ error: 'Missing "text".' });
 
   const finalPieces = [];
-  const allSteps = [];
+  const charSteps = [];
 
   for (const ch of text) {
     const code = encryptMap[ch];
     if (!code) return res.status(400).json({ error: `Char '${ch}' not found` });
 
-    // ---------- Steps 2–7 (identical to before) ----------
-    const first3 = code.slice(0,3);
-    const next2  = code.slice(3,5);
-    const last4  = code.slice(5,9);
+    // Steps 2-7 (unchanged)
+    const first3 = code.slice(0,3), next2 = code.slice(3,5), last4 = code.slice(5,9);
     const a = +first3[0], b = +first3[1], c = +first3[2];
-    const sum_ab = a+b;
-    const prod = sum_ab * c;
-    const sum_bc = b+c;
-    const mod1 = prod % sum_bc;
-    const mod2 = sum_bc % prod;
+    const sum_ab = a+b, prod = sum_ab * c, sum_bc = b+c;
+    const mod1 = prod % sum_bc, mod2 = sum_bc % prod;
     const carry = mod1 + mod2;
-
     const midVal = parseInt(next2, 10);
     const step4res = carry * midVal;
 
     // Step 5 – scramble last4
     let rot = last4;
     const set1 = [], set2 = [];
-    for (let i=0;i<3;i++) {
-      rot = rot.slice(1) + rot[0];
-      set1.push(parseInt(rot,10));
-    }
+    for (let i=0;i<3;i++) { rot = rot.slice(1) + rot[0]; set1.push(parseInt(rot,10)); }
     rot = last4;
-    for (let i=0;i<3;i++) {
-      rot = rot[rot.length-1] + rot.slice(0,-1);
-      set2.push(parseInt(rot,10));
-    }
-    const diffs = [];
-    let scrambleSum = 0;
-    for (let i=0;i<3;i++) {
-      const d = Math.abs(set1[i]-set2[i]);
-      diffs.push(d);
-      scrambleSum += d;
-    }
+    for (let i=0;i<3;i++) { rot = rot[rot.length-1] + rot.slice(0,-1); set2.push(parseInt(rot,10)); }
+    const diffs = set1.map((v,i) => Math.abs(v - set2[i]));
+    const scrambleSum = diffs.reduce((a,b) => a+b, 0);
 
+    // Step 6
     const step6quotient = Math.floor(scrambleSum / step4res);
 
+    // Step 7
     const base5Str = step6quotient.toString(5);
     const base5AsDecimal = parseInt(base5Str, 10);
     const first3Num = parseInt(first3, 10);
     const step7result = base5AsDecimal * first3Num;
 
-    // ---------- Step 8: Chain ----------
-    const sumBase5 = sumDigits(base5Str);
-    const divisor1 = sumBase5 || 1;
+    // Step 8 – chain
+    const sumBase5 = sumDigits(base5Str) || 1;
     const bigNum = step7result;
-    const mod1_8 = bigNum % divisor1;
-    const div1_8 = Math.floor(bigNum / divisor1);
-    const mod2_8 = div1_8 % divisor1;
-    const div2_8 = Math.floor(div1_8 / divisor1);
-    const last4Sum = sumDigits(last4);
-    const divisor2 = last4Sum || 1;
-    const mod3_8 = div2_8 % divisor2;
-    const chainNumbers = [divisor1, mod1_8, mod2_8, mod3_8];
-    const chainSum = chainNumbers.reduce((s,v)=>s+v, 0);
-    const chainFinal = chainSum * divisor1;
+    const mod1_8 = bigNum % sumBase5;
+    const div1_8 = Math.floor(bigNum / sumBase5);
+    const mod2_8 = div1_8 % sumBase5;
+    const div2_8 = Math.floor(div1_8 / sumBase5);
+    const last4Sum = sumDigits(last4) || 1;
+    const mod3_8 = div2_8 % last4Sum;
+    const chainNumbers = [sumBase5, mod1_8, mod2_8, mod3_8];
+    const chainSum = chainNumbers.reduce((s,v)=>s+v,0);
+    const chainFinal = chainSum * sumBase5;
 
     // Step 9 – weave
-    const weaved = weave(divisor1, chainFinal, div2_8);
+    const weaved = weave(sumBase5, chainFinal, div2_8);
 
-    // Step 10 – triple conversion
+    // Step 10 – triple base conversion
     const weavedBig = BigInt(weaved);
     const base5_2 = toBaseN(weavedBig, 5);
     const base5AsBigDec = fromBaseN(base5_2, 10);
@@ -176,70 +154,81 @@ app.post('/api/encrypt', async (req, res) => {
     const base7AsBigDec = fromBaseN(base7, 10);
     const hex = toBaseN(base7AsBigDec, 16).toUpperCase();
 
-    // Step 11 – wrap with signature
+    // Step 11 – wrap with table signature
     const sig = String(currentTableKey).padStart(4, '0');
     const last2sig = sig.slice(2);
     const first2sig = sig.slice(0,2);
     const wrapped = last2sig + hex + first2sig;
 
-    // Step 12 – swap first & last 4
+    // Step 12 – swap first 4 / last 4
     const first4 = wrapped.slice(0,4);
     const last4part = wrapped.slice(-4);
     const mid = wrapped.slice(4, -4);
-    const swapped = last4part + mid + first4;
+    const final12 = last4part + mid + first4;
 
-    // ---------- NEW STEPS 13–16 ----------
-    // Step 13: hex → base 10
-    const step13dec = fromBaseN(swapped, 16).toString(10);
+    finalPieces.push(final12);
 
-    // Step 14: base 10 → base 4
-    const step14base4 = toBaseN(step13dec, 4);
-
-    // Step 15: pretend base4 is decimal → base 9
-    const step14asDec = fromBaseN(step14base4, 10);
-    const step15base9 = toBaseN(step14asDec, 9);
-
-    // Step 16: pretend base9 is decimal → base 16 (hex) → FINAL OUTPUT
-    const step15asDec = fromBaseN(step15base9, 10);
-    const finalHex = toBaseN(step15asDec, 16).toUpperCase();
-
-    finalPieces.push(finalHex);
-
-    // Store every detail for frontend
-    allSteps.push({
+    charSteps.push({
       character: ch, code, first3, next2, last4,
       step3: { a,b,c,sum_ab, prod, sum_bc, mod1, mod2, carry },
       step4: { midVal, step4res },
       step5: { set1, set2, diffs, scrambleSum },
       step6: { dividend:scrambleSum, divisor:step4res, quotient:step6quotient },
       step7: { base5Str, base5AsDecimal, first3Num, product:step7result },
-      step8: { sumBase5, divisor1, mod1_8, div1_8, mod2_8, div2_8, last4Sum, divisor2, mod3_8, chainNumbers, chainSum, chainFinal },
+      step8: { sumBase5, mod1_8, div1_8, mod2_8, div2_8, last4Sum, mod3_8, chainNumbers, chainSum, chainFinal },
       step9: { weaved },
       step10: { base5_2, base7, hex },
       step11: { sig, last2sig, first2sig, wrapped },
-      step12: { first4, last4part, mid, swapped },
-      step13: { hexInput: swapped, decimal: step13dec },
-      step14: { base4: step14base4 },
-      step15: { base9: step15base9 },
-      step16: { finalHex }
+      step12: { first4, last4part, mid, final: final12 }
     });
   }
 
-  const finalCiphertext = finalPieces.join('');
-  console.log(`✅ Full encrypt: "${text}" -> ${finalCiphertext.length} chars`);
+  // -------- GLOBAL STEPS 13‑16 on concatenated step‑12 string --------
+  const concatHex = finalPieces.join('');
 
+  // Step 13: Hex → BigInt (base 10)
+  const bigDec13 = BigInt(`0x${concatHex}`); // or fromBaseN(concatHex,16)
+  const base10Str = bigDec13.toString(10);
+
+  // Step 14: Base 10 → Base 4
+  const base4Str = toBaseN(bigDec13, 4);
+
+  // Step 15: Treat base4 as decimal → Base 9
+  const base4AsBigDec = fromBaseN(base4Str, 10);
+  const base9Str = toBaseN(base4AsBigDec, 9);
+
+  // Step 16: Treat base9 as decimal → Hex
+  const base9AsBigDec = fromBaseN(base9Str, 10);
+  const finalHex = toBaseN(base9AsBigDec, 16).toUpperCase();
+
+  const globalSteps = {
+    concatHexAfter12: concatHex,
+    step13: { hexInput: concatHex, base10: base10Str },
+    step14: { base10Input: base10Str, base4: base4Str },
+    step15: { base4AsDecimalInput: base4Str, base9: base9Str },
+    step16: { base9AsDecimalInput: base9Str, finalHex }
+  };
+
+  console.log(`✅ Encrypt "${text}" → final hex length ${finalHex.length}`);
+
+  // Optional logging to Supabase
   try {
     await supabase.from('cipher_logs').insert({
       operation: 'encrypt',
       input_hash: sha256(text),
-      output_hash: sha256(finalCiphertext)
+      output_hash: sha256(finalHex)
     });
   } catch(e) {}
 
-  res.json({ tableKey: currentTableKey, result: finalCiphertext, steps: allSteps });
+  res.json({
+    tableKey: currentTableKey,
+    result: finalHex,            // This appears in the output box
+    charSteps,
+    globalSteps
+  });
 });
 
-// Decrypt unchanged
+// -------- DECRYPT (unchanged) --------
 app.post('/api/decrypt', async (req, res) => {
   if (!Object.keys(decryptMap).length) return res.status(503).json({ error:'Mapping not loaded' });
   const { ciphertext } = req.body;
@@ -255,7 +244,7 @@ app.post('/api/decrypt', async (req, res) => {
   res.json({ result });
 });
 
-app.get('/', (_,res)=> res.json({ status:'Cipher API v16', tableId:currentTableId, mappings:Object.keys(encryptMap).length }));
+app.get('/', (_,res) => res.json({ status:'Cipher API v16', tableId:currentTableId, mappings:Object.keys(encryptMap).length }));
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, '0.0.0.0', ()=> console.log(`🚀 Port ${PORT}`));
+app.listen(PORT, '0.0.0.0', () => console.log(`🚀 Port ${PORT}`));
