@@ -90,7 +90,7 @@ function weave(start, num1, num2) {
   return res;
 }
 
-// -------- CORE ENCRYPT FUNCTION (returns steps + final piece) --------
+// -------- ENCRYPT SINGLE CHARACTER --------
 function encryptSingleCharacter(ch, tableKey) {
   const code = encryptMap[ch];
   if (!code) return null;
@@ -180,41 +180,18 @@ function encryptSingleCharacter(ch, tableKey) {
   const step16BigInt = fromBaseN(step15Base9, 10);
   const finalHex = toBaseN(step16BigInt, 16).toUpperCase();
 
-  return {
-    character: ch,
-    code,
-    first3, next2, last4,
-    step3: { a,b,c, sum_ab, sum_abc, prod, mod1, mod2, carry },
-    step4: { midVal, step4res },
-    step5: { set1, set2, diffs, scrambleSum },
-    step6: { dividend:scrambleSum, divisor:step4res, quotient:step6quotient },
-    step7: { base5Str, base5AsDecimal, first3Num, product:step7result },
-    step8: { sumBase5, divisor1, mod1_8, div1_8, mod2_8, div2_8, last4Sum, divisor2, mod3_8, chainNumbers, chainSum, chainFinal },
-    step9: { weaved },
-    step10: { base5_2, base7, hex: hex10 },
-    step11: { sig, last2sig, first2sig, wrapped },
-    step12: { first4, last4part, mid, swapped },
-    step13: { base10: step13Base10 },
-    step14: { base4: step14Base4 },
-    step15: { base9: step15Base9 },
-    step16: { finalHex }
-  };
+  return finalHex;  // we only need the final hex now
 }
 
-// -------- PERFORM FULL ENCRYPT (single pass on a string) --------
+// -------- ENCRYPT FULL TEXT --------
 function encryptText(text) {
-  const steps = [];
-  const finalPieces = [];
+  const pieces = [];
   for (const ch of text) {
-    const step = encryptSingleCharacter(ch, currentTableKey);
-    if (!step) return null; // character not found
-    steps.push(step);
-    finalPieces.push(step.step16.finalHex);
+    const hex = encryptSingleCharacter(ch, currentTableKey);
+    if (!hex) return null;
+    pieces.push(hex);
   }
-  return {
-    result: finalPieces.join(''),
-    steps
-  };
+  return pieces.join('');
 }
 
 // -------- ROUTES --------
@@ -226,20 +203,13 @@ app.post('/api/encrypt', async (req, res) => {
   if (typeof text !== 'string' || !text.trim())
     return res.status(400).json({ error: 'Missing "text".' });
 
-  // First pass
-  const firstPass = encryptText(text);
-  if (!firstPass) return res.status(400).json({ error: 'Text contains unsupported characters.' });
+  const encryptedHex = encryptText(text);
+  if (!encryptedHex) return res.status(400).json({ error: 'Text contains unsupported characters.' });
 
-  // Second pass – encrypt the hex output of the first pass as the new input
-  const secondPass = encryptText(firstPass.result);
-  if (!secondPass) return res.status(400).json({ error: 'Second pass failed (character set mismatch).' });
-
-  const doubleEncryptedHex = secondPass.result;
-
-  // Generate QR code as data URL (PNG)
+  // Generate QR code
   let qrDataUrl;
   try {
-    qrDataUrl = await QRCode.toDataURL(doubleEncryptedHex, {
+    qrDataUrl = await QRCode.toDataURL(encryptedHex, {
       errorCorrectionLevel: 'H',
       type: 'image/png',
       margin: 2,
@@ -250,42 +220,14 @@ app.post('/api/encrypt', async (req, res) => {
     return res.status(500).json({ error: 'Failed to generate QR code.' });
   }
 
-  // Optional logging
-  try {
-    await supabase.from('cipher_logs').insert({
-      operation: 'encrypt',
-      input_hash: sha256(text),
-      output_hash: sha256(doubleEncryptedHex)
-    });
-  } catch(e) {}
-
   res.json({
-    tableKey: currentTableKey,
-    firstPassResult: firstPass.result,
-    doubleEncryptedHex: doubleEncryptedHex,
-    qrCodeDataUrl: qrDataUrl,
-    firstPassSteps: firstPass.steps,
-    secondPassSteps: secondPass.steps
+    encryptedHex,
+    qrCodeDataUrl: qrDataUrl
   });
 });
 
-// Old decrypt endpoint (unchanged, only for 9‑digit codes)
-app.post('/api/decrypt', async (req, res) => {
-  if (!Object.keys(decryptMap).length) return res.status(503).json({ error:'Mapping not loaded' });
-  const { ciphertext } = req.body;
-  if (typeof ciphertext !== 'string' || ciphertext.length % 9 !== 0 || !/^[1-9]+$/.test(ciphertext))
-    return res.status(400).json({ error:'Invalid ciphertext' });
-  let result = '';
-  for (let i=0; i<ciphertext.length; i+=9) {
-    const chunk = ciphertext.slice(i,i+9);
-    const ch = decryptMap[chunk];
-    if (!ch) return res.status(400).json({ error:`Unknown code ${chunk}` });
-    result += ch;
-  }
-  res.json({ result });
-});
-
-app.get('/', (_,res)=> res.json({ status:'Cipher API v16+QR', tableId:currentTableId, mappingsLoaded:Object.keys(encryptMap).length }));
+// Health check
+app.get('/', (_,res)=> res.json({ status:'Cipher API', tableId:currentTableId, mappingsLoaded:Object.keys(encryptMap).length }));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', ()=> console.log(`🚀 Port ${PORT}`));
