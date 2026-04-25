@@ -59,6 +59,7 @@ setInterval(loadCipherTable, 30 * 60 * 1000);
 function sha256(s) { return crypto.createHash('sha256').update(s).digest('hex'); }
 const sumDigits = s => [...s].reduce((sum, d) => sum + parseInt(d, 10), 0);
 
+// ========== FIXED BASE CONVERSION ==========
 function toBaseN(num, radix) {
   if (radix === 10) return num.toString(10);
   const big = BigInt(num);
@@ -66,11 +67,14 @@ function toBaseN(num, radix) {
   const digits = [];
   let n = big;
   while (n > 0n) {
-    digits.push(Number(n % BigInt(radix)));
+    const remainder = Number(n % BigInt(radix));
+    // Use native .toString(radix) to get correct digits (0‑9, A‑Z)
+    digits.push(remainder.toString(radix).toUpperCase());
     n /= BigInt(radix);
   }
   return digits.reverse().join('');
 }
+// ===========================================
 
 function fromBaseN(str, radix) {
   return [...str].reduce((acc, d) => acc * BigInt(radix) + BigInt(parseInt(d, radix)), 0n);
@@ -88,7 +92,7 @@ function weave(start, num1, num2) {
   return res;
 }
 
-// -------- ENCRYPT --------
+// -------- ENCRYPT (ALL 16 STEPS) --------
 app.post('/api/encrypt', async (req, res) => {
   if (!Object.keys(encryptMap).length)
     return res.status(503).json({ error: 'Mapping not loaded yet.' });
@@ -109,7 +113,6 @@ app.post('/api/encrypt', async (req, res) => {
     const last4  = code.slice(5,9);
     const a = +first3[0], b = +first3[1], c = +first3[2];
 
-    // Step 3 – CORRECTED: a+b, then (a+b)*c, then mod with (a+b+c)
     const sum_ab = a + b;
     const sum_abc = sum_ab + c;
     const prod = sum_ab * c;
@@ -181,7 +184,7 @@ app.post('/api/encrypt', async (req, res) => {
     const mid = wrapped.slice(4, -4);
     const swapped = last4part + mid + first4;
 
-    // Step 13‑16
+    // Steps 13‑16
     const step13BigInt = BigInt('0x' + swapped);
     const step13Base10 = step13BigInt.toString(10);
     const step14Base4 = toBaseN(step13BigInt, 4);
@@ -227,7 +230,7 @@ app.post('/api/encrypt', async (req, res) => {
   res.json({ tableKey: currentTableKey, result: finalOutput, steps: allSteps });
 });
 
-// Decrypt (unchanged – works only with old 9‑digit codes)
+// Decrypt (currently still old method – not yet updated)
 app.post('/api/decrypt', async (req, res) => {
   if (!Object.keys(decryptMap).length) return res.status(503).json({ error:'Mapping not loaded' });
   const { ciphertext } = req.body;
