@@ -31,7 +31,8 @@ async function loadCipherTable() {
     const { data: tables, error } = await supabase
       .from('cipher_tables').select('id, table_key').order('id', { ascending: false }).limit(1);
     if (error || !tables?.length) {
-      console.error('❌ No cipher table found');
+      console.error('❌ No cipher table found, using fallback key 9999');
+      currentTableKey = 9999;
       return;
     }
     const latest = tables[0];
@@ -90,7 +91,7 @@ function weave(start, num1, num2) {
   return res;
 }
 
-// -------- ENCRYPT SINGLE CHARACTER --------
+// -------- ENCRYPT SINGLE CHARACTER (returns full step object) --------
 function encryptSingleCharacter(ch, tableKey) {
   const code = encryptMap[ch];
   if (!code) return null;
@@ -180,18 +181,38 @@ function encryptSingleCharacter(ch, tableKey) {
   const step16BigInt = fromBaseN(step15Base9, 10);
   const finalHex = toBaseN(step16BigInt, 16).toUpperCase();
 
-  return finalHex;  // we only need the final hex now
+  return {
+    character: ch,
+    code,
+    first3, next2, last4,
+    step3: { a,b,c, sum_ab, sum_abc, prod, mod1, mod2, carry },
+    step4: { midVal, step4res },
+    step5: { set1, set2, diffs, scrambleSum },
+    step6: { dividend:scrambleSum, divisor:step4res, quotient:step6quotient },
+    step7: { base5Str, base5AsDecimal, first3Num, product:step7result },
+    step8: { sumBase5, divisor1, mod1_8, div1_8, mod2_8, div2_8, last4Sum, divisor2, mod3_8, chainNumbers, chainSum, chainFinal },
+    step9: { weaved },
+    step10: { base5_2, base7, hex: hex10 },
+    step11: { sig, last2sig, first2sig, wrapped },
+    step12: { first4, last4part, mid, swapped },
+    step13: { base10: step13Base10 },
+    step14: { base4: step14Base4 },
+    step15: { base9: step15Base9 },
+    step16: { finalHex }
+  };
 }
 
-// -------- ENCRYPT FULL TEXT --------
+// -------- FULL TEXT ENCRYPT --------
 function encryptText(text) {
+  const steps = [];
   const pieces = [];
   for (const ch of text) {
-    const hex = encryptSingleCharacter(ch, currentTableKey);
-    if (!hex) return null;
-    pieces.push(hex);
+    const step = encryptSingleCharacter(ch, currentTableKey);
+    if (!step) return null;
+    steps.push(step);
+    pieces.push(step.step16.finalHex);
   }
-  return pieces.join('');
+  return { encryptedHex: pieces.join(''), steps };
 }
 
 // -------- ROUTES --------
@@ -203,13 +224,12 @@ app.post('/api/encrypt', async (req, res) => {
   if (typeof text !== 'string' || !text.trim())
     return res.status(400).json({ error: 'Missing "text".' });
 
-  const encryptedHex = encryptText(text);
-  if (!encryptedHex) return res.status(400).json({ error: 'Text contains unsupported characters.' });
+  const result = encryptText(text);
+  if (!result) return res.status(400).json({ error: 'Text contains unsupported characters.' });
 
-  // Generate QR code
   let qrDataUrl;
   try {
-    qrDataUrl = await QRCode.toDataURL(encryptedHex, {
+    qrDataUrl = await QRCode.toDataURL(result.encryptedHex, {
       errorCorrectionLevel: 'H',
       type: 'image/png',
       margin: 2,
@@ -221,12 +241,12 @@ app.post('/api/encrypt', async (req, res) => {
   }
 
   res.json({
-    encryptedHex,
+    encryptedHex: result.encryptedHex,
+    steps: result.steps,
     qrCodeDataUrl: qrDataUrl
   });
 });
 
-// Health check
 app.get('/', (_,res)=> res.json({ status:'Cipher API', tableId:currentTableId, mappingsLoaded:Object.keys(encryptMap).length }));
 
 const PORT = process.env.PORT || 3000;
